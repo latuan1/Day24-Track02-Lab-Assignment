@@ -1,30 +1,36 @@
 #!/bin/bash
-# Pre-commit hook: chạy security checks trước khi commit
+# Pre-commit hook: run security checks before commit.
 
-echo "🔍 Running security checks..."
+set -e
+
+echo "Running security checks..."
+
+if [ ! -d "src" ] && [ -d "medviet-governance/src" ]; then
+    cd medviet-governance
+fi
+
+run_python_module() {
+    if [ -x ".venv/Scripts/python.exe" ]; then
+        ".venv/Scripts/python.exe" -m "$@"
+    elif [ -x ".venv/bin/python" ]; then
+        ".venv/bin/python" -m "$@"
+    else
+        python -m "$@"
+    fi
+}
 
 # 1. git-secrets scan
 git secrets --pre_commit_hook -- "$@"
-if [ $? -ne 0 ]; then
-    echo "❌ git-secrets found potential secrets! Commit blocked."
-    exit 1
-fi
+echo "git-secrets scan passed."
 
 # 2. Bandit SAST scan
-echo "🐍 Running Bandit SAST..."
-bandit -r src/ -ll -q
-if [ $? -ne 0 ]; then
-    echo "❌ Bandit found security issues! Review above."
-    exit 1
-fi
+echo "Running Bandit SAST..."
+run_python_module bandit -r src/ -ll -q
+echo "Bandit scan passed."
 
 # 3. pip-audit dependency check
-echo "📦 Checking dependencies for CVEs..."
-pip-audit --desc on
-if [ $? -ne 0 ]; then
-    echo "⚠️  Vulnerable dependencies found! Update before committing."
-    exit 1
-fi
+echo "Checking dependencies for CVEs..."
+run_python_module pip_audit --desc on
+echo "pip-audit check passed."
 
-echo "✅ All security checks passed!"
-exit 0
+echo "All security checks passed."

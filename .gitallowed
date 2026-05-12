@@ -1,0 +1,9 @@
+.gitallowed:[0-9]+:.*
+README\.md:[0-9]+:curl -X DELETE -H "Authorization: Bearer token-bob"
+README\.md:[0-9]+:git secrets --add 'password\\s
+README\.md:[0-9]+:git secrets --add 'secret_key\\s
+README\.md:[0-9]+:zip -r lab24_submission_<ten_sv>\.zip
+README\.md:[0-9]+:    src/ tests/ policies/ data/processed/
+medviet-governance/reports/bandit_report\.json:[0-9]+:    "src/
+medviet-governance/src/pii/detector\.py:[0-9]+:.*regex=r".*@.*
+medviet-governance/src/quality/validation\.py:[0-9]+:EMAIL_REGEX = r".*@.*

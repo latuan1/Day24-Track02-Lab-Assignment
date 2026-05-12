@@ -1,11 +1,59 @@
-# src/pii/anonymizer.py
+import secrets
+
 import pandas as pd
+from faker import Faker
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
-from faker import Faker
+
 from .detector import build_vietnamese_analyzer, detect_pii
 
 fake = Faker("vi_VN")
+
+
+def _fake_cccd() -> str:
+    return "".join(secrets.choice("0123456789") for _ in range(12))
+
+
+def _fake_phone() -> str:
+    prefix = secrets.choice(["03", "05", "07", "08", "09"])
+    suffix = "".join(secrets.choice("0123456789") for _ in range(8))
+    return f"{prefix}{suffix}"
+
+
+def _unique_fake_values(
+    generator,
+    count: int,
+    excluded_values=None,
+    forbidden_substrings=None,
+) -> list[str]:
+    """Generate values that do not collide with raw PII or each other."""
+    if excluded_values is None:
+        excluded_values = []
+    if forbidden_substrings is None:
+        forbidden_substrings = []
+
+    excluded = {str(value) for value in excluded_values if not pd.isna(value)}
+    forbidden = {
+        str(value)
+        for value in forbidden_substrings
+        if not pd.isna(value) and str(value).strip()
+    }
+    generated = set()
+    values = []
+
+    for _ in range(count):
+        for _attempt in range(1000):
+            value = str(generator())
+            has_forbidden_part = any(part in value for part in forbidden)
+            if value not in excluded and value not in generated and not has_forbidden_part:
+                generated.add(value)
+                values.append(value)
+                break
+        else:
+            raise RuntimeError("Unable to generate a unique anonymized value")
+
+    return values
+
 
 class MedVietAnonymizer:
 
@@ -15,79 +63,164 @@ class MedVietAnonymizer:
 
     def anonymize_text(self, text: str, strategy: str = "replace") -> str:
         """
-        TODO: Anonymize text với strategy được chọn.
+        Anonymize PII text with the selected strategy.
 
         Strategies:
-        - "mask"    : Nguyen Van A → N****** V** A
-        - "replace" : thay bằng fake data (dùng Faker)
-        - "hash"    : SHA-256 one-way hash
-        - "generalize": chỉ dùng cho tuổi/năm sinh
+        - replace: substitute fake values with Faker
+        - mask: mask detected entities with "*"
+        - hash: replace detected entities with SHA-256 hashes
         """
+        if pd.isna(text):
+            return text
+
+        text = str(text)
         results = detect_pii(text, self.analyzer)
         if not results:
             return text
 
-        # TODO: implement operators dict dựa trên strategy
-        operators = {}
-
         if strategy == "replace":
             operators = {
-                "PERSON": OperatorConfig("replace", 
-                          {"new_value": fake.name()}),
-                "EMAIL_ADDRESS": OperatorConfig("replace", 
-                                 {"new_value": ___}),   # TODO: fake email
-                "VN_CCCD": OperatorConfig("replace", 
-                           {"new_value": ___}),          # TODO: fake CCCD
-                "VN_PHONE": OperatorConfig("replace", 
-                            {"new_value": ___}),         # TODO: fake phone
+                "PERSON": OperatorConfig("replace", {"new_value": fake.name()}),
+                "EMAIL_ADDRESS": OperatorConfig("replace", {"new_value": fake.email()}),
+                "VN_CCCD": OperatorConfig("replace", {"new_value": _fake_cccd()}),
+                "VN_PHONE": OperatorConfig("replace", {"new_value": _fake_phone()}),
             }
         elif strategy == "mask":
-            # TODO: implement masking
-            pass
+            operators = {
+                "DEFAULT": OperatorConfig(
+                    "mask",
+                    {
+                        "masking_char": "*",
+                        "chars_to_mask": 100,
+                        "from_end": True,
+                    },
+                )
+            }
         elif strategy == "hash":
-            # TODO: implement hashing dùng sha256
-            pass
+            operators = {
+                "DEFAULT": OperatorConfig("hash", {"hash_type": "sha256"})
+            }
+        else:
+            raise ValueError(f"Unsupported anonymization strategy: {strategy}")
 
         anonymized = self.anonymizer.anonymize(
             text=text,
             analyzer_results=results,
-            operators=operators
+            operators=operators,
         )
         return anonymized.text
 
     def anonymize_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        TODO: Anonymize toàn bộ DataFrame.
-        - Cột text (ho_ten, dia_chi, email): dùng anonymize_text()
-        - Cột cccd, so_dien_thoai: replace trực tiếp bằng fake data
-        - Cột benh, ket_qua_xet_nghiem: GIỮ NGUYÊN (cần cho model training)
-        - Cột patient_id: GIỮ NGUYÊN (pseudonym đã đủ an toàn)
+        Anonymize PII columns while preserving non-PII training features.
         """
         df_anon = df.copy()
+        row_count = len(df_anon)
+        name_columns = [col for col in ["ho_ten", "bac_si_phu_trach"] if col in df_anon]
+        raw_names = []
+        for col in name_columns:
+            raw_names.extend(df_anon[col].dropna().astype(str).tolist())
 
-        # TODO: Xử lý từng cột PII
-        # Gợi ý: dùng df.apply() hoặc list comprehension
+        if "ho_ten" in df_anon.columns:
+            df_anon["ho_ten"] = _unique_fake_values(
+                fake.name,
+                row_count,
+                raw_names,
+                raw_names,
+            )
+
+        if "email" in df_anon.columns:
+            df_anon["email"] = _unique_fake_values(
+                fake.email,
+                row_count,
+                df_anon["email"],
+            )
+
+        if "bac_si_phu_trach" in df_anon.columns:
+            df_anon["bac_si_phu_trach"] = _unique_fake_values(
+                fake.name,
+                row_count,
+                raw_names,
+                raw_names,
+            )
+
+        if "dia_chi" in df_anon.columns:
+            forbidden_address_parts = raw_names
+            for col in ["cccd", "so_dien_thoai", "email"]:
+                if col in df_anon:
+                    forbidden_address_parts.extend(df_anon[col].dropna().astype(str).tolist())
+
+            df_anon["dia_chi"] = _unique_fake_values(
+                fake.address,
+                row_count,
+                df_anon["dia_chi"],
+                forbidden_address_parts,
+            )
+
+        if "cccd" in df_anon.columns:
+            df_anon["cccd"] = _unique_fake_values(
+                _fake_cccd,
+                row_count,
+                df_anon["cccd"],
+            )
+
+        if "so_dien_thoai" in df_anon.columns:
+            df_anon["so_dien_thoai"] = _unique_fake_values(
+                _fake_phone,
+                row_count,
+                df_anon["so_dien_thoai"],
+            )
 
         return df_anon
 
-    def calculate_detection_rate(self, 
-                                  original_df: pd.DataFrame,
-                                  pii_columns: list) -> float:
-        """
-        TODO: Tính % PII được detect thành công.
-        Mục tiêu: > 95%
+    @staticmethod
+    def _normalize_cell_for_detection(column: str, value) -> str:
+        """Restore leading zeroes lost when CSV identifiers are read as numbers."""
+        if pd.isna(value):
+            return ""
 
-        Logic: với mỗi ô trong pii_columns,
-               kiểm tra xem detect_pii() có tìm thấy ít nhất 1 entity không.
+        text = str(value).strip()
+        if text.endswith(".0") and text[:-2].isdigit():
+            text = text[:-2]
+
+        if column == "cccd" and text.isdigit() and len(text) <= 12:
+            return text.zfill(12)
+
+        if (
+            column == "so_dien_thoai"
+            and text.isdigit()
+            and len(text) == 9
+            and text[0] in "35789"
+        ):
+            return f"0{text}"
+
+        return text
+
+    def calculate_detection_rate(
+        self,
+        original_df: pd.DataFrame,
+        pii_columns: list,
+    ) -> float:
+        """
+        Calculate the share of PII cells with at least one detected entity.
         """
         total = 0
         detected = 0
 
         for col in pii_columns:
-            for value in original_df[col].astype(str):
+            for value in original_df[col]:
                 total += 1
+                value = self._normalize_cell_for_detection(col, value)
                 results = detect_pii(value, self.analyzer)
                 if len(results) > 0:
                     detected += 1
 
         return detected / total if total > 0 else 0.0
+
+if __name__ == "__main__":
+    import pandas as pd
+
+    df = pd.read_csv("data/raw/patients_raw.csv", dtype={"cccd": str, "so_dien_thoai": str})
+    df_anon = MedVietAnonymizer().anonymize_dataframe(df)
+    df_anon.to_csv("data/processed/patients_anonymized.csv", index=False)
+    print(f"Wrote {len(df_anon)} anonymized rows")
